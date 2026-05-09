@@ -249,6 +249,8 @@ This helps make the LLM behavior safer and more scientifically grounded.
 
 I added and extended tests in `tests/stats/test_library.py`.
 
+Note: the `stats` directory name is historical. These are the tests for my literature-search/RAG module (`creseq_mcp/literature/search.py`), not a separate statistics-only component.
+
 The test coverage includes:
 
 - CRE candidate ranking
