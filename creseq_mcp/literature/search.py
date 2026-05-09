@@ -1,5 +1,5 @@
 """
-creseq_mcp/stats/library.py
+creseq_mcp/literature/library.py
 ===========================
 
 Stats and interpretation tools for CRE-seq / MPRA activity data.
