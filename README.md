@@ -1,226 +1,329 @@
-# BioE-134 Final Project, Bowman's contributions
+# Literature Search + RAG Contributions
 
-## 1. Project Overview
+This document summarizes my contributions to the CRE-seq MCP final project. My section focused on the literature-search and retrieval-augmented generation (RAG) layer that helps interpret enriched transcription factor motifs from CRE-seq / MPRA results using external biological evidence.
 
-For our final project, our team built a Cre-Seq analyzer. Cre-seq is a massively parallel reporter assay that measures the transcriptional activity of thousands of candidate cis-regulatory elements simultaneously by linking each element to a unique DNA barcode and quantifying barcode abundance in RNA versus DNA. Within our project, we built tools for processing raw sequencing data and gathering read counts, quality control analysis of the library, activity calling, plotting, RAG based literature search and annotation, and an MCP-backed Claude agent that allows users to run and interpret the full pipeline through natural language. We were inspired to build this from Agarwal, Inoue et al. (2025), 'Massively parallel characterization of transcriptional regulatory elements,' Nature [1].
+## Project Area
 
-**My contributions**: I worked on the data processing, QC, and MCP server for this project. The data processing steps (association and counting) are exposed through the MCP server alongside the QC tools, allowing users to run the full pipeline end-to-end through natural language.
+My work is centered in:
 
-## 2. Data Collection
+- `creseq_mcp/literature/search.py`
+- `creseq_mcp/server.py`
+- `frontend/agent.py`
+- `tests/stats/test_library.py`
+- `pyproject.toml`
 
-While the earlier stages of our project were built on synthetic data, real data was needed to properly assess our pipeline. I sourced our data from Agarwal, et al. [1]. The data was stored in the ENCODE portal under experiment ENCSR463IRX. At first, the organization of this data was very confusing. There are multiple pages for different file types, and it was not immediately clear which files corresponded to which steps of the pipeline. After carefully reading the methods section of the paper, I identified the six files I needed: the association R1 reads, the barcode index, the plasmid DNA counts,two RNA replicate FASTQs, and the design FASTA. 
+The literature/RAG pipeline sits after activity calling and motif enrichment. It takes enriched TF motifs, searches biological evidence sources, scores and classifies the evidence, and produces citation-ready context rows for an LLM to use when explaining possible CRE regulators.
 
-The box drive is linked here: https://berkeley.box.com/s/ouz2tfv72dnfbqnu3utagnw8mtdhkfc7
+## MCP Tools Added Or Extended
 
- | File | Purpose |                                         
-  |---|---|
-  | rna_rep2.fastq.gz | RNA replicate 2 — barcode counts (numerator) |                                                          
-  | rna_rep1_correct.fastq.gz | RNA replicate 1 — barcode counts (numerator) |                                                  
-  | assoc_bc.fastq.gz | Barcode index — i5 reads linking barcodes to oligos |                                                  
-  | dna_rep1.fastq.gz | Plasmid DNA barcode counts (denominator) |                                                            
-  | reference.fa | Design FASTA — all designed oligo sequences |
+I contributed the following MCP-facing tools:
 
+- `tool_rank_cre_candidates`
+- `tool_motif_enrichment_summary`
+- `tool_prepare_rag_context`
+- `tool_search_pubmed`
+- `tool_search_jaspar_motif`
+- `tool_search_encode_tf`
+- `tool_literature_search_for_motifs`
+- `tool_interpret_literature_evidence`
+- `tool_prepare_literature_rag_context`
 
-## 3. Library QC Module
+These tools expose the literature and interpretation layer through the MCP server so the frontend agent can call them automatically.
 
-- File: `creseq_mcp/qc/library.py`
-- I built 9 tools as part of the qc module. 
+## Pipeline Workflow
 
-| Tool | Inputs | Output | Description | Citation |
-|---|---|---|---|---|
-| `tool_barcode_complexity` | `mapping_table_path` (str), `min_reads_per_barcode` (int) | dict — per-oligo barcode counts pass/fail | Counts how many distinct barcodes support each designed oligo and the median read depth per barcode. PASS when median barcodes/oligo ≥ 10. | [1][2] |
-| `tool_oligo_recovery` | `mapping_table_path` (str), `design_manifest_path` (str), `thresholds` (list[int]) | dict — recovery rates by category, pass/fail | Measures what fraction of designed oligos were recovered, broken out by category. PASS when test element recovery ≥ 80% and positive control recovery ≥ 95%. | [5] |
-| `tool_barcode_collision_analysis` | `mapping_table_path` (str, optional), `min_read_support` (int) | dict — collision rate, pass/fail | Identifies barcodes that map to more than one designed oligo, which introduces noise in activity measurements. PASS when collision rate < 1%. | [6] |
-| `tool_barcode_uniformity` | `plasmid_count_path` (str, optional), `min_barcodes_per_oligo` (int) | dict — Gini coefficient, pass/fail | Measures evenness of barcode abundance across the plasmid pool using the Gini coefficient. A high Gini indicates a few barcodes dominating. PASS when median Gini < 0.30. | [7] |
-| `tool_gc_content_bias` | `mapping_table_path` (str, optional), `design_manifest_path` (str, optional), `gc_bins` (int) | dict — recovery by GC bin, pass/fail | Checks whether oligos with extreme GC content were lost during synthesis by stratifying recovery across GC bins. PASS when no bins show recovery < 50% of the median. | [8] |
-| `tool_oligo_length_qc` | `mapping_table_path` (str, optional), `design_manifest_path` (str, optional) | dict — fraction full-length, pass/fail | Checks for synthesis truncations by comparing observed alignment length to designed oligo length. PASS when median fraction full-length ≥ 0.80. | [5] |
-| `tool_plasmid_depth_summary` | `plasmid_count_path` (str, optional) | dict — read depth statistics, pass/fail | Reports barcode-level read count statistics in the plasmid DNA library. PASS when median DNA count ≥ 10 and fewer than 10% of barcodes have zero counts. | [2] |
-| `tool_variant_family_coverage` | `mapping_table_path` (str, optional), `design_manifest_path` (str, optional) | dict — family recovery rates, pass/fail | Checks that each variant family (reference oligo + all mutants) is fully recovered. Missing a reference makes delta score computation impossible. PASS when ≥ 80% of families fully recovered. | [1] |
-| `tool_library_summary_report` | `mapping_table_path` (str, optional), `plasmid_count_path` (str, optional), `design_manifest_path` (str, optional) | dict — overall pass/fail, failed checks, per-tool summaries | Runs all applicable QC tools in a single call and returns an overall pass/fail with per-tool summaries. Main entry point for one-shot library QC. | — |
+The literature/RAG workflow is:
 
-Example Prompts: 
-- "Run a full QC report on my library and tell me if it passes."
-- "How many barcodes are supporting each oligo?"                                                           
-- "What fraction of my designed oligos were actually recovered? Break it down
-  by category."                                                                 
-- "Are any barcodes mapping to more than one oligo?"                                                              
-- "Is my plasmid library evenly represented, or are a few barcodes dominating?
-   Give me the Gini coefficient."                                               
-- "Did high or low GC oligos drop out during synthesis? Check for GC content
-  bias in my recovery."                                                         
-- "Are my oligos the right length, or is there evidence of synthesis   
-  truncations?"                                                                 
-- "What's the sequencing depth of my plasmid DNA library? Are any barcodes
-  missing coverage?"                                                            
-- "For each variant family, did all the mutants make it in — including the
-  reference oligo?"  
+1. Rank active CRE candidates from activity results.
+2. Summarize motifs enriched among active CREs.
+3. Search for supporting evidence for top TF motifs.
+4. Retrieve evidence from PubMed, JASPAR, and ENCODE.
+5. Classify the evidence type.
+6. Score each evidence record for biological relevance.
+7. Convert the best records into citation-ready RAG context.
+8. Return structured rows that an LLM can cite without inventing unsupported claims.
 
-## 4. Association Step
+The main output files are:
 
-- File: `creseq_mcp/association/association.py`
-- Replaces Nextflow/MPRAflow for the one-time library build step: R1 FASTQ + design FASTA → `mapping_table.tsv`
+- `literature_evidence.tsv`
+- `literature_rag_context.tsv`
 
-**Protocol note** — In the lentiMPRA protocol, the random barcode is sequenced as the i5 index read during paired-end Illumina sequencing. It appears in every FASTQ header after the final colon (`1:N:0:BARCODE+i7index`). R1 reads the oligo insert (used for alignment). Neither R1 nor R2 contains the barcode in the sequence itself.
+## Query Generation
 
-**Inputs**
+I implemented synonym-aware and intent-aware query generation for PubMed.
 
-- `fastq_r1`:  R1 FASTQ — oligo insert reads
-- `fastq_r2`: R2 FASTQ — paired oligo reads for better alignment (Optional)
-- `design_fasta`: FASTA of all designed oligo sequences 
-- `outdir`: Directory to write output TSVs 
-- `fastq_bc`: Separate barcode index FASTQ (ENCODE format: i5 read as its own file; read names must match R1) 
-- `labels_path`: TSV with oligo_id + designed_category columns 
-- `min_cov`: Minimum reads per barcode–oligo pair (default 3) 
-- `min_frac`: Minimum fraction mapping to same oligo (default 0.5) 
-- `mapq_threshold`:  Minimum minimap2 mapping quality (default 20) 
-- `starcode_dist`: STARCODE edit-distance for clustering (default 1)
+The query builder expands TF names and aliases, for example:
 
-**Pipeline**
-1. Parse R1 headers → raw barcode per read
-2. STARCODE → cluster barcodes within edit-distance 1 (error correction) [4]
-3. mappy/minimap2 → align R1 sequences to design FASTA → oligo_id per read [3]
-4. Join → (clustered barcode, oligo_id) per read
-5. Filter → min_cov reads AND min_frac mapping to same oligo
-6. Write → `mapping_table.tsv`, `plasmid_counts.tsv`, `design_manifest.tsv`
+- `NRF2`
+- `NFE2L2`
+- `NF-E2-related factor 2`
 
-**Outputs**
+It also supports lightweight cell-type expansion, for example:
 
-`mapping_table.tsv`: barcode, oligo_id, n_reads, cigar, md
-`plasmid_counts.tsv`: barcode, oligo_id, dna_count 
-`design_manifest.tsv`: oligo_id, sequence, designed_category, variant_family
+- `HepG2`
+- `hepatocyte`
+- `liver cell`
+- `hepatic cell`
+- `hepatocellular carcinoma`
 
-**Note on file paths** — When called through the MCP server, `outdir` is not set by the user. Output files are written to a temporary association directory and then copied into `UPLOAD_DIR` (`~/.creseq/uploads/` by default, overridable via the `CRESEQ_UPLOAD_DIR` environment variable). All downstream tools resolve their input paths from `UPLOAD_DIR` automatically. This is to ensure matching file locations across pipeline steps — the association output, DNA/RNA counts, and QC tools all read from and write to the same directory without the user needing to pass paths between calls.
+The upgraded query system builds multiple search intents:
 
+- `mpra`: MPRA, massively parallel reporter assay, luciferase evidence
+- `binding`: ChIP-seq, CUT&RUN, CUT&Tag evidence
+- `motif`: motif and TF binding-site evidence
+- `perturbation`: knockdown, knockout, CRISPR, overexpression evidence
 
-## 5. DNA and RNA Counting
+This improves retrieval quality because a single PubMed query often misses useful papers. The multi-intent approach separates direct reporter-assay evidence from binding and perturbation evidence.
 
-- File: `creseq_mcp/activity/counting.py`
-- Counts barcode occurrences in DNA/RNA FASTQs using the mapping table produced by the association step.
+## External Evidence Sources
 
-**Inputs - DNA Counting**
+I added or extended API-backed searches for:
 
-- `fastq_path`: DNA barcode FASTQ
-- `mapping_table_path`: Barcode→oligo mapping TSV from association 
-- `upload_dir`: Directory to write output 
-- `barcode_len`: Length of barcode to extract from read (default 20)
-- `barcode_end`: Which end of read contains barcode: `"3prime"` or `"5prime"` (default `"3prime"`)
-- `max_mismatch`: Allowed mismatches when matching barcodes (default 0) 
+- PubMed through NCBI E-utilities
+- JASPAR motif matrix profiles
+- ENCODE functional genomics records
 
-**Inputs — RNA Counting**
+For PubMed, the tool retrieves:
 
--`fastq_paths`: One FASTQ per RNA replicate 
--`mapping_table_path`: Barcode→oligo mapping TSV from association 
--`upload_dir`: Directory to write output
-- `rep_names`: Replicate labels (default `rep1`, `rep2`, …) 
--`barcode_len`: Length of barcode to extract (default 20)
-- `barcode_end`: `"3prime"` or `"5prime"` (default `"3prime"`)
-- `max_mismatch`:  Allowed mismatches (default 0) 
+- PMID
+- title
+- journal
+- publication date
+- authors
+- abstract
+- URL
 
-**Outputs**
+For JASPAR, the tool retrieves:
 
-- `plasmid_counts.tsv`: barcode, oligo_id, dna_count 
-- `rna_counts.tsv`: barcode, oligo_id, rna_count_rep1, rna_count_rep2, …
+- matrix ID
+- motif/TF name
+- collection
+- taxonomic group
+- family/class metadata
+- motif URL
 
-**Another note on file paths** If running the full pipeline from the association stage, `mapping_table_path` is not required as an input to downstream tools — it is resolved automatically from `UPLOAD_DIR`. If skipping the association stage and providing a pre-built mapping table, the path must be passed explicitly. Again, `UPLOAD_DIR` is internally managed by the server and is not exposed as a user-facing parameter; it can be redirected by setting the `CRESEQ_UPLOAD_DIR` environment variable before starting the server.
+For ENCODE, the tool retrieves:
 
-## 6. MCP Server
+- accession
+- assay title
+- target TF label
+- biosample/cell type
+- release status
+- experiment URL
 
-- File: `creseq_mcp/server.py`
+## Evidence Classification
 
-I chose to use FastMCP package for our project. It allows for simple and consistent tool/resource registration. Each tool is registered with a single `@mcp.tool()` decorator — FastMCP reads the function's type hints and docstring to auto-generate the JSON schema that Claude uses to understand what the tool does and what arguments it accepts. Rather than writing raw JSON wrappers by hand, we wrote Python functions with explicit signatures, type hints, and docstrings, and FastMCP handled the schema generation automatically. The function signatures and docstrings serve as the source of truth for the wrapper content.
+I added rule-based evidence classification so the RAG layer can distinguish stronger biological evidence from weaker database-only evidence.
 
-The server is initialized as:
+Evidence records are classified as:
 
-```python
-mcp = FastMCP("creseq-mcp", instructions="...")
+- `MPRA`
+- `Reporter_assay`
+- `ChIP_binding`
+- `Motif_analysis`
+- `Perturbation`
+- `Review`
+- `Database`
+- `Unknown`
+
+This matters because direct MPRA or reporter-assay evidence should count more strongly for CRE-seq interpretation than a generic motif database hit.
+
+## Evidence Scoring
+
+I rewrote the evidence scoring logic to prioritize biological relevance.
+
+The score uses:
+
+- TF/synonym match
+- target cell-type match
+- evidence type strength
+- regulatory keywords
+- assay keywords
+- recency
+
+Evidence type strength is weighted so direct CRE/MPRA evidence ranks highest:
+
+- `MPRA`: strongest
+- `Reporter_assay`: strong
+- `Perturbation`: useful functional evidence
+- `ChIP_binding`: useful binding evidence
+- `Motif_analysis`: mechanistic but less direct
+- `Review`: background support
+- `Database`: useful but lower confidence alone
+
+The scoring output includes:
+
+- `evidence_score`
+- `evidence_score_normalized`
+- `confidence`
+
+Confidence is mapped to:
+
+- `high`
+- `medium`
+- `low`
+
+## RAG Context Formatting
+
+I implemented citation-ready RAG rows through `prepare_literature_rag_context`.
+
+Each RAG row includes:
+
+- `source_id`
+- `tf`
+- `motif_id`
+- `source`
+- `evidence_type`
+- `claim`
+- `direction`
+- `cell_type`
+- `assay`
+- `encode_support`
+- `evidence_score`
+- `confidence`
+- `citation`
+- `url`
+- `context`
+- `why_relevant`
+- `contradicts`
+
+This gives the LLM enough structured context to explain findings while citing specific evidence records.
+
+## Claim Extraction
+
+I added simple rule-based claim extraction.
+
+The claim extractor looks for sentences containing:
+
+- the TF or a synonym
+- regulatory language such as activates, represses, required, drives, necessary, controls, or regulates
+
+It also estimates direction:
+
+- `activation`
+- `repression`
+- `unknown`
+
+For database records without paper abstracts, it creates clean fallback claims, for example:
+
+- `ENCODE reports TF ChIP-seq for NFE2L2 in HepG2.`
+- `JASPAR provides motif profile MA0150.2 for NRF2.`
+
+This prevents the LLM from receiving empty or unhelpful context.
+
+## RAG Balancing
+
+I added balancing logic so the final RAG context is not dominated by one evidence type or one TF.
+
+The formatter tries to include diverse evidence when available:
+
+- at least one MPRA/reporter record
+- at least one ChIP/binding record
+- at least one motif/mechanistic record
+
+It also:
+
+- caps records per TF
+- deduplicates highly similar claims
+- sorts records by evidence quality
+
+This makes the final context more useful for biological interpretation.
+
+## Frontend Agent Integration
+
+I updated the frontend agent prompt so the chat assistant knows the correct pipeline order.
+
+The prompt instructs the agent to:
+
+- run literature search after motif enrichment
+- prepare RAG context from `literature_evidence.tsv`
+- ground answers in RAG context rows
+- cite `source_id`, `citation`, or `url`
+- avoid unsupported literature claims
+
+This helps make the LLM behavior safer and more scientifically grounded.
+
+## Testing
+
+I added and extended tests in `tests/stats/test_library.py`.
+
+The test coverage includes:
+
+- CRE candidate ranking
+- motif enrichment summary
+- synonym-aware PubMed query construction
+- multi-intent query generation
+- evidence classification
+- evidence scoring and sorting
+- PubMed API parsing with mocked responses
+- JASPAR API parsing with mocked responses
+- ENCODE target filtering with mocked responses
+- combined literature search across sources
+- writing `literature_evidence.tsv`
+- RAG context filtering
+- citation/source ID generation
+- claim extraction
+- database fallback context
+- RAG output schema
+
+The focused literature/RAG test suite passes:
+
+```bash
+python3 -m pytest tests/stats/test_library.py
 ```
 
-The `instructions` field is sent to the model at the start of every session and sets global context. It functions like a system prompt scoped to the MCP server — Claude receives it before any tool calls are made, so it shapes how the agent interprets user requests and which assumptions it brings into the conversation. In our case, the instructions tell the agent the full scope of available tools, that file path arguments are optional, and that QC thresholds are calibrated for CRE-seq rather than other MPRA variants. 
+Expected result:
 
-**MCP JSON wrappers** — each tool's wrapper is auto-generated by FastMCP from the function's type hints and docstring. For example, `tool_plasmid_depth_summary` is defined as:
-
-```python
-@mcp.tool()
-def tool_plasmid_depth_summary(plasmid_count_path: str | None = None) -> dict:
-    """
-    Barcode-level read-count statistics in the plasmid DNA library.
-    PASS when median dna_count >= 10 AND fewer than 10% of barcodes have zero counts.
-    """
+```text
+23 passed
 ```
 
-FastMCP exposes this to the LLM as a JSON schema equivalent to:
+## Dependencies
 
-```json
-{
-  "name": "tool_plasmid_depth_summary",
-  "description": "Barcode-level read-count statistics in the plasmid DNA library. PASS when median dna_count >= 10 AND fewer than 10% of barcodes have zero counts.",
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "plasmid_count_path": {
-        "type": "string",
-        "description": "Path to plasmid counts TSV. Optional — resolved from UPLOAD_DIR if omitted."
-      }
-    }
-  }
-}
+I added `requests` as a project dependency because the literature module calls external APIs:
+
+- PubMed / NCBI E-utilities
+- JASPAR REST API
+- ENCODE REST API
+
+## Why This Matters
+
+The goal of this section is to turn motif enrichment results into interpretable biological evidence.
+
+Without this layer, the pipeline can say that a motif is enriched, but it cannot explain whether that TF has known support in:
+
+- MPRA or reporter assays
+- TF binding experiments
+- motif databases
+- cell-type-specific ENCODE datasets
+- perturbation studies
+
+My contribution adds that interpretive bridge. It lets the MCP answer questions like:
+
+- Which TFs might explain the active CREs?
+- Is there literature support for this TF in this cell type?
+- Is the support direct MPRA evidence or weaker motif/database evidence?
+- Which citations support the interpretation?
+- What evidence should the LLM use when writing a biological explanation?
+
+## Example Output
+
+A final RAG row can look conceptually like:
+
+```text
+source_id: PMID:111
+tf: NRF2
+evidence_type: MPRA
+claim: NFE2L2 NRF2 drives enhancer activity in HepG2 by MPRA.
+direction: activation
+assay: MPRA
+confidence: high
+citation: PMID 111
+why_relevant:
+  - matches TF/synonym
+  - matches target cell type
+  - mentions regulatory context
+  - mentions reporter/MPRA-style assay context
 ```
 
-All 9 QC tools, the association tool, DNA/RNA counting tools, and literature tools follow this same pattern. Inputs marked `str | None = None` are optional; when omitted, the server resolves the path from `UPLOAD_DIR` automatically via the `_path()` helper.
-
-**Resources** — the Agarwal et al. 2025 paper is registered as a queryable resource at `paper://agarwal2025-lentimpra` using `@mcp.resource(...)`. Claude can retrieve the full text of the paper and use it to annotate results or answer questions about the assay design.
-
-## 7. Pytests
-
-72 tests across 3 files. All tests use synthetic in-memory fixtures and cover edge cases including empty inputs, zero counts, below-threshold values, and missing columns — no real sequencing data required to run them.
-
-| File | Tests | Coverage |
-|---|---|---|
-| `tests/qc/test_library.py` | 38 | All 9 QC tools — pass/fail logic, edge cases, empty inputs, threshold boundaries |
-| `tests/test_association.py` | 24 | FASTQ header barcode parsing, gzip detection, filter logic, barcode–oligo assignment |
-| `tests/test_counting.py` | 10 | DNA and RNA barcode counting, mismatch tolerance, multi-replicate output |
-
-## 8. Bugs and Issues Along the Way
-
-**Table Names/File Locations**
-
-I ran into a number of issues along the way. Because we are dealing with many files and tables, having names and locations match is key. This is one of the issues in chaining together current tools as well. Everytime I ran the full pipeline, I would find errors related to these two artifacts. Slowly, I uncovered these errors and ensured that file locations and table column names agree.
-
-Since I wanted to add the ability to skip association (it takes over an hour to complete), I had to make sure intermediate files were saved in place where users can access. This added more complexity to file saving and as the server needed to know whether outputs came from a fresh association run or from pre-existing files already in UPLOAD_DIR.
-
-**Wrong Files**
-
-One of the more frustrating issues was using the wrong RNA FASTQ file. The ENCODE portal organizes files across multiple pages, and I initially downloaded an R2 read file thinking it was R1. Because R2 reads the oligo from the opposite end, the barcodes weren't being found and counting returned near-zero matches. It wasn't obvious at first because the pipeline ran without errors, the counts were just returned zeros. After looking through the methods section and consulting claude, I was able to find the right RNA FASTQ file. 
-
-**Other Issues** 
-
-Along the way, I ran into small issues with file formats and simple bugs in code. These included a dict vs. 2-tuple unpacking bug in the QC tools, a same-file copy error when outputs were written back to their own source, a broken else-branch in the skip-association toggle, and UPLOAD_DIR path instability when the server was run from different working directories. None were individually difficult, but each only surfaced when the full pipeline was run end-to-end. 
-
-## 9. LLM Usage
-
-Most of my code was written with Claude Code. This was a great test on my ability to accurately prompt what functions I want written. Many times, I ran into issues with Claude not understanding what I want to write and it threw my part of the project off track. To get over this, I had to carefully think about all aspects of the functions I wanted to write and even ideated with Claude to help me flesh out my ideas. 
-
-The more I write with an LLM, the more I learn what level of abstraction I would be "vibe coding" at. How granualar should my prompts be? Should I ask it go write the entire QC library in one shot, or should I go tool by tool. What am I confortable with? I played around with this idea along the project and I am slowly finding that the LLM and I write code best at a level above individual functions but not too abstract where I'm not interacting with those smaller functions. 
-
-## 10. Collaboration
-
-I collaborated with Sarrah Rose, Arjun Gurjar, and Zach Rao on this project. Sarrah worked on plotting and downstream analysis, Arjun worked on the frontend, and Zach worked on RAG based tools. 
-
-
-## 11. Citations
-
-[1] Agarwal, V., Inoue, F. et al. Massively parallel characterization of transcriptional regulatory elements. *Nature* 637, 569–577 (2025). https://doi.org/10.1038/s41586-024-08430-9
-
-[2] Gordon, M.G., Inoue, F., Martin, B. et al. lentiMPRA and MPRAflow for high-throughput functional characterization of gene regulatory elements. *Nat Protoc* 15, 2387–2412 (2020). https://doi.org/10.1038/s41596-020-0333-5
-
-[3] Li, H. Minimap2: pairwise alignment for nucleotide sequences. *Bioinformatics* 34(18), 3094–3100 (2018). https://doi.org/10.1093/bioinformatics/bty191
-
-[4] Zorita, E., Cuscó, P. & Filion, G.J. Starcode: sequence clustering based on all-pairs search. *Bioinformatics* 31(12), 1913–1919 (2015). https://doi.org/10.1093/bioinformatics/btv053
-
-[5] Kuiper, B.P., Prins, R.C. & Billerbeck, S. Oligo pools as an affordable source of synthetic DNA for cost-effective library construction in protein- and metabolic pathway engineering. *ChemBioChem* 23(7), e202100507 (2022). https://doi.org/10.1002/cbic.202100507
-
-[6] Johnson, M.S., Venkataram, S. & Kryazhimskiy, S. Best practices in designing, sequencing, and identifying random DNA barcodes. *J Mol Evol* 91, 263–280 (2023). https://doi.org/10.1007/s00239-022-10083-z
-
-[7] Planet, E., Stephan-Otto Attolini, C., Reina, O., Flores, O. & Rossell, D. htSeqTools: high-throughput sequencing quality control, processing and visualization in R. *Bioinformatics* 28(4), 589–590 (2012). https://doi.org/10.1093/bioinformatics/btr700
-
-[8] Benjamini, Y. & Speed, T.P. Summarizing and correcting the GC content bias in high-throughput sequencing. *Nucleic Acids Res.* 40(10), e72 (2012). https://doi.org/10.1093/nar/gks001
+This is the kind of structured context the LLM can safely use to write a grounded interpretation.
